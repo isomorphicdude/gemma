@@ -38,7 +38,9 @@ dependencies = [
     "etils[edc,enp,epath,epy,etree]",
     "einops",
     "grain ; sys_platform != 'win32'",
-    "hackable-diffusion @ git+https://github.com/google/hackable_diffusion.git",
+    # Fork: pinned to the commit the working environment was built with (see
+    # FORK_SETUP.md). Upstream leaves this unpinned, so fresh installs drift.
+    "hackable-diffusion @ git+https://github.com/google/hackable_diffusion.git@8581c8713fd8006dddec8f0e01d89bb48bfb6c35",
     "jax",
     "jaxtyping",
     "kaggle",

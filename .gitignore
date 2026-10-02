@@ -27,3 +27,13 @@ poetry.lock
 # Ignore generated docs
 docs/_build
 docs/api
+
+# Fork: prepared datasets (hundreds of MB to GB, see FORK_SETUP.md) and
+# training work directories created next to the repo root.
+*.bagz
+*.jsonl
+gemma/diffusion/hackable_diffusion_adapter/data/sudoku/sudoku.csv
+xp_dir*/
+
+# Virtual environments
+.venv/

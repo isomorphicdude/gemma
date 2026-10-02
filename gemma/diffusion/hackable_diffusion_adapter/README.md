@@ -3,6 +3,12 @@
 This package contains the adapter library for fine-tuning using the
 Hackable Diffusion library.
 
+> [!Note]
+> **Fork:** before following the upstream steps below, read
+> [FORK_SETUP.md](../../../FORK_SETUP.md). It replaces `pip install .` with an
+> editable install pinned by `constraints.txt`, covers arm64 / GH200 clusters
+> and offline nodes, and lists the known limitations.
+
 ## Setup Instructions
 
 ### 1. Python Environment

@@ -4,6 +4,14 @@ This document is designed to guide AI coding agents through the structure,
 setup, testing, and training workflows of the **Hackable Diffusion (HD) Text
 Diffusion Supervised Fine-Tuning (SFT)** adapter library.
 
+> **Fork note:** this is the `isomorphicdude/gemma` fork (work branch:
+> `sudoku-sft`). The installation steps below already follow the fork
+> procedure (editable install with `constraints.txt`); see
+> [FORK_SETUP.md](../../../FORK_SETUP.md) at the repo root for the rest of
+> the fork setup (git workflow, arm64 / GH200 details, offline checkpoint
+> and tokenizer provisioning, data copying, known limitations). Push to
+> `origin` (the fork) only, never to `upstream`.
+
 ---
 
 ## 📋 Codebase Structure
@@ -27,39 +35,73 @@ The project is structured as a standard Python/JAX package.
 
 ## 🛠️ Setup and Installation
 
-Follow these instructions to set up the local Python environment.
+These instructions target the **arm64 / GH200 remote cluster**. **Do not**
+`pip install gemma` from PyPI and do not use a plain `pip install .`: both
+copy a frozen snapshot into `site-packages`, so edits in the checkout are
+silently ignored. This fork is installed in **editable mode** with pinned
+constraints, so code edits are live without reinstalling (moving between
+machines is just commit / push / pull). See
+[FORK_SETUP.md](../../../FORK_SETUP.md) for the full fork setup (git
+workflow, offline checkpoint/tokenizer provisioning, data copying, known
+limitations).
 
-### 1. Python Environment Setup
-We recommend Python 3.12 and CUDA 13.
+### 1. Prerequisites
 
-### 2. Installation
-First install the gemma package.
+*   Python 3.12 and [uv](https://docs.astral.sh/uv/) — needs a version with
+    `--excludes` (tested with 0.11.28). Plain pip has no equivalent of
+    `--excludes`; use uv.
+*   NVIDIA driver 580+ on the compute nodes (check `nvidia-smi`) — required
+    by the CUDA 13 wheels.
+*   glibc 2.28 or newer (`ldd --version`).
+*   A C++20-capable compiler loaded (e.g. `module load gcc`) and internet
+    access during installation: `bagz` has no arm64 wheel and builds from
+    source, downloading Abseil and zstd.
 
-**From PyPI (Recommended)**
+### 2. Clone the fork and create the environment
+
+The virtual environment lives inside the clone at `.venv/` (git-ignored), so
+one directory holds code, environment and data:
 
 ```bash
-pip install gemma
-```
-
-**From Source**
-
-```bash
-git clone https://github.com/google-deepmind/gemma.git
+git clone -b sudoku-sft git@github.com:isomorphicdude/gemma.git
 cd gemma
-pip install .
+uv venv --python 3.12 --prompt diffgemma
+source .venv/bin/activate
 ```
 
-Then we additionally require `jax[cuda13]` dependencies that can be installed
-via
+### 3. Editable install with constraints
 
 ```bash
-pip install -U jax[cuda13]
+uv pip install -e . "jax[cuda13]" -c constraints.txt --excludes excludes-aarch64.txt
+```
+
+`--excludes excludes-aarch64.txt` drops `tensorflow-cpu`, which has no arm64
+build in any version (the full `tensorflow` wheel exists for arm64 and is
+pulled in anyway by `tensorflow-text`). On x86-64 machines, omit
+`--excludes`.
+
+If another environment is active in the shell, uv installs into that one
+(`$VIRTUAL_ENV` wins over `./.venv`); either `deactivate` first or add
+`--python .venv/bin/python` to the install command.
+
+### 4. Verify
+
+```bash
+# Must print a path inside the clone, from any working directory.
+python -c "import importlib.util as u; print(u.find_spec('gemma').origin)"
+# On a GPU node: must list CudaDevice entries. Restrict to one free GPU and
+# skip preallocation so the check does not grab memory on busy GPUs.
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false python -c "import jax; print(jax.devices())"
+# Loads the Sudoku config without training (from the repo root, CPU only).
+JAX_PLATFORMS=cpu python -m gemma.diffusion.hackable_diffusion_adapter.configs.sft_sudoku_test
 ```
 
 > **CUDA Version Constraint**: If configuring JAX for GPU, you must use
-> **CUDA 13**. Mixing CUDA 12 packages (such as `jax-cuda12-plugin` or
+> **CUDA 13** (driver 580+; the wheels bundle the CUDA 13 libraries).
+> Mixing CUDA 12 packages (such as `jax-cuda12-plugin` or
 > `nvidia-nccl-cu12`) will trigger PJRT initialization crashes and silent
-> NCCL corruption.
+> NCCL corruption. If the driver is older than 580, `jax[cuda12]` exists for
+> the same JAX version (driver 525+), untested with this adapter.
 
 ---
 
@@ -94,6 +136,9 @@ cd -
 ---
 
 ## 🧪 Running Unit Tests
+
+`pytest` is not part of the pinned environment; install it first with
+`uv pip install -e ".[dev]"`.
 
 To verify the JAX layers, data pipelines, and sampling routines, run:
 
