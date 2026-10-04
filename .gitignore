@@ -37,3 +37,6 @@ xp_dir*/
 
 # Virtual environments
 .venv/
+
+# Local Apptainer image for the Isambard CUDA 13 launcher.
+.apptainer/

@@ -19,17 +19,17 @@ Diffusion Supervised Fine-Tuning (SFT)** adapter library.
 The project is structured as a standard Python/JAX package.
 
 *   **`configs/`**: Kauldron config files defining task hyperparameters, datasets, losses, optimizers, and evaluators.
-    *   [`sft_sudoku.py`](gemma/diffusion/hackable_diffusion_adapter/configs/sft_sudoku.py): LoRA-based SFT training for the Sudoku puzzle solving task.
-    *   [`sft_sudoku_full.py`](gemma/diffusion/hackable_diffusion_adapter/configs/sft_sudoku_full.py): Full weight SFT training for the Sudoku puzzle solving task (no LoRA).
-    *   [`sft_pubmedqa.py`](gemma/diffusion/hackable_diffusion_adapter/configs/sft_pubmedqa.py): LoRA-based SFT training for the PubMedQA long-answer task.
+    *   [`sft_sudoku.py`](configs/sft_sudoku.py): LoRA-based SFT training for the Sudoku puzzle solving task.
+    *   [`sft_sudoku_full.py`](configs/sft_sudoku_full.py): Full weight SFT training for the Sudoku puzzle solving task (no LoRA).
+    *   [`sft_pubmedqa.py`](configs/sft_pubmedqa.py): LoRA-based SFT training for the PubMedQA long-answer task.
 *   **`data/`**: Dataset loading, custom pipelines, and preprocessing transforms.
-    *   [`data.py`](gemma/diffusion/hackable_diffusion_adapter/data/data.py): Common transforms (e.g. `CanvasChunker` for localized diffusion).
+    *   [`data.py`](data/data.py): Common transforms (e.g. `CanvasChunker` for localized diffusion).
 *   **`hd/`**: Core modeling, network layers, and state handling.
-    *   [`sft_model.py`](gemma/diffusion/hackable_diffusion_adapter/hd/sft_model.py): Core `SFTDiffusion` class managing the hybrid AR prefill and localized diffusion denoising steps.
-    *   [`lora.py`](gemma/diffusion/hackable_diffusion_adapter/hd/lora.py): PEFT LoRA wrappers.
-    *   [`mask_helpers.py`](gemma/diffusion/hackable_diffusion_adapter/hd/mask_helpers.py): Right-pad causal/block masks and cursor tracking.
+    *   [`sft_model.py`](hd/sft_model.py): Core `SFTDiffusion` class managing the hybrid AR prefill and localized diffusion denoising steps.
+    *   [`lora.py`](hd/lora.py): PEFT LoRA wrappers.
+    *   [`mask_helpers.py`](hd/mask_helpers.py): Right-pad causal/block masks and cursor tracking.
 *   **`eval/`**: Custom evaluation metrics designed to avoid TPU/GPU OOM issues.
-    *   [`sudoku_eval.py`](gemma/diffusion/hackable_diffusion_adapter/eval/sudoku_eval.py): Unified host-side `SudokuAllMetrics` evaluation.
+    *   [`sudoku_eval.py`](eval/sudoku_eval.py): Unified host-side `SudokuAllMetrics` evaluation.
 
 ---
 
@@ -50,12 +50,15 @@ limitations).
 *   Python 3.12 and [uv](https://docs.astral.sh/uv/) — needs a version with
     `--excludes` (tested with 0.11.28). Plain pip has no equivalent of
     `--excludes`; use uv.
-*   NVIDIA driver 580+ on the compute nodes (check `nvidia-smi`) — required
-    by the CUDA 13 wheels.
+*   A driver compatible with the CUDA 13 wheels, either natively (580+) or
+    through the validated Apptainer setup below. Isambard Phase 2 currently
+    has driver 565.57.01; loading its CUDA 11.8/12.6 modules is insufficient.
+*   Apptainer for the Isambard launcher (tested with 1.4.1).
 *   glibc 2.28 or newer (`ldd --version`).
-*   A C++20-capable compiler loaded (e.g. `module load gcc`) and internet
-    access during installation: `bagz` has no arm64 wheel and builds from
-    source, downloading Abseil and zstd.
+*   Internet access during provisioning. The current ARM64 environment has
+    `bagz` 0.3.8 installed. If an installation needs to build `bagz` from
+    source, provide a C++20-capable compiler and access to Abseil/zstd
+    downloads; do not assume every ARM64 installation requires this build.
 
 ### 2. Clone the fork and create the environment
 
@@ -84,24 +87,73 @@ If another environment is active in the shell, uv installs into that one
 (`$VIRTUAL_ENV` wins over `./.venv`); either `deactivate` first or add
 `--python .venv/bin/python` to the install command.
 
-### 4. Verify
+### 4. Isambard Phase 2: provision on login, run through Apptainer
+
+Use [the project launcher](../../../scripts/isambard_cuda13.sh) for GPU
+commands on this cluster. Run the following from the **repository root**,
+the directory containing `pyproject.toml`, `.venv/`, `scripts/`, and `gemma/`:
 
 ```bash
-# Must print a path inside the clone, from any working directory.
-python -c "import importlib.util as u; print(u.find_spec('gemma').origin)"
-# On a GPU node: must list CudaDevice entries. Restrict to one free GPU and
-# skip preallocation so the check does not grab memory on busy GPUs.
-CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false python -c "import jax; print(jax.devices())"
-# Loads the Sudoku config without training (from the repo root, CPU only).
-JAX_PLATFORMS=cpu python -m gemma.diffusion.hackable_diffusion_adapter.configs.sft_sudoku_test
+# Download/build once on a login node; subsequent calls reuse the cached SIF.
+scripts/isambard_cuda13.sh --pull
+
+# Allocate two GPUs to check both CUDA execution and NCCL communication.
+XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
+NCCL_ALGO=Ring NCCL_PROTO=LL128 NCCL_NVLS_ENABLE=0 NCCL_CUMEM_ENABLE=0 \
+srun --nodes=1 --gpus=2 --ntasks=1 --time=00:05:00 \
+    scripts/isambard_cuda13.sh --check
 ```
 
-> **CUDA Version Constraint**: If configuring JAX for GPU, you must use
-> **CUDA 13** (driver 580+; the wheels bundle the CUDA 13 libraries).
-> Mixing CUDA 12 packages (such as `jax-cuda12-plugin` or
-> `nvidia-nccl-cu12`) will trigger PJRT initialization crashes and silent
-> NCCL corruption. If the driver is older than 580, `jax[cuda12]` exists for
-> the same JAX version (driver 525+), untested with this adapter.
+Compute-node downloads are slow. Prepare the image on the login node before
+starting GPU jobs; `--pull` limits image compression to two CPU threads.
+The default cache is `.apptainer/cuda-13.0.0-arm64.sif` (git-ignored).
+To use project storage, set `GEMMA_CUDA13_IMAGE` to the same absolute SIF path
+for provisioning and execution. Stage checkpoints and tokenizers before
+training as described in [FORK_SETUP.md](../../../FORK_SETUP.md).
+
+The launcher pins NVIDIA `cuda:13.0.0-base-ubuntu24.04` by its ARM64 manifest
+digest. Its R580 compatibility `libcuda` works with the installed JAX 0.11.2
+and CUDA 13.4.92 wheels. The CUDA 13.4.1 image's R615 compatibility driver
+failed `cuInit` with `CUDA_ERROR_SYSTEM_DRIVER_MISMATCH` on this cluster;
+do not replace the image with a newer tag without a GPU workload check.
+
+Apptainer runs with `--nv --cleanenv --no-eval`. Inside the container,
+`LD_LIBRARY_PATH=/usr/local/cuda/compat:/.singularity.d/libs` selects the
+compatibility driver before the injected host driver. CUDA runtime/math
+libraries come from the pinned `.venv` wheels, so the image's CUDA runtime
+directory is excluded. Keep this library path local to the launcher;
+do not add it to shell profiles or prepend system CUDA module paths.
+The launcher uses the editable `.venv`, binds the checkout/home/`/projects`,
+and preserves Slurm's GPU selection and the XLA/NCCL settings shown above.
+Respect the allocation's `CUDA_VISIBLE_DEVICES`; do not replace it with a
+hard-coded GPU index. Use `APPTAINERENV_<NAME>` for additional application
+variables that the launcher does not explicitly forward.
+
+Verified on 2026-10-04: `libcuda.so.580.65.06`, the wheel-provided CUDA 13.4
+runtime, a JAX GPU matrix product, a two-GPU NCCL/JAX all-reduce, and all nine
+Sudoku config tests. The GPU check forces the CUDA backend and checks
+`cuInit`, imported Gemma location, and computed results; a driver API version
+or device listing alone is insufficient. Full training and multi-node jobs
+remain untested. See [FORK_SETUP.md](../../../FORK_SETUP.md#isambard-ai-phase-2-apptainer-launcher)
+for the compatibility support caveat and detailed validation record.
+
+### 5. Verify the editable import and Sudoku config
+
+```bash
+# From the repository root, must print a path inside the editable clone.
+.venv/bin/python -c "import importlib.util as u; print(u.find_spec('gemma').origin)"
+# Isambard: run all nine Sudoku config tests through the launcher, on CPU.
+JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES="" \
+srun --nodes=1 --gpus=1 --ntasks=1 --time=00:05:00 \
+    scripts/isambard_cuda13.sh python -m \
+    gemma.diffusion.hackable_diffusion_adapter.configs.sft_sudoku_test
+```
+
+> **CUDA package consistency:** keep the existing CUDA 13 environment and
+> `constraints.txt` pins. Do not mix in CUDA 12 plugins or libraries such as
+> `jax-cuda12-plugin` or `nvidia-nccl-cu12`, or downgrade JAX/CUDA merely to
+> match Isambard's native driver. Use the validated compatibility launcher
+> and repeat its GPU check when changing the image or CUDA wheels.
 
 ---
 
@@ -137,18 +189,25 @@ cd -
 
 ## 🧪 Running Unit Tests
 
-`pytest` is not part of the pinned environment; install it first with
-`uv pip install -e ".[dev]"`.
+The Sudoku config checks above use the existing environment and do not
+require pytest. For pytest suites, install the development dependencies if
+needed, retaining the fork's constraints and ARM64 exclusion:
+
+```bash
+uv pip install --python .venv/bin/python -e ".[dev]" "jax[cuda13]" \
+    -c constraints.txt --excludes excludes-aarch64.txt
+```
 
 To verify the JAX layers, data pipelines, and sampling routines, run:
 
 ```bash
-pytest gemma/diffusion/hackable_diffusion_adapter/
+# Inside a Slurm allocation on Isambard, from the repository root.
+scripts/isambard_cuda13.sh python -m pytest gemma/diffusion/hackable_diffusion_adapter/
 ```
 
 Or run individual tests:
 ```bash
-pytest gemma/diffusion/hackable_diffusion_adapter/hd/lora_test.py
+scripts/isambard_cuda13.sh python -m pytest gemma/diffusion/hackable_diffusion_adapter/hd/lora_test.py
 ```
 
 ---
@@ -158,7 +217,11 @@ pytest gemma/diffusion/hackable_diffusion_adapter/hd/lora_test.py
 Always use the standard Kauldron CLI command. Use the following env variables
 to prevent JIT compilation OOMs and NCCL communication hangs:
 
-Launches should be run from the parent dir of the gemma directory.
+Run from the repository root. On Isambard, use the cached image and the
+launcher through Slurm, as below. These examples allocate two GPUs on one
+node; global batch sizes must be divisible by the allocated GPU count.
+Ensure the prepared datasets, checkpoint, and tokenizer are available
+before starting a training allocation.
 
 #### PubMedQA
 
@@ -168,7 +231,8 @@ env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
     NCCL_PROTO="LL128" \
     NCCL_NVLS_ENABLE="0" \
     NCCL_CUMEM_ENABLE="0" \
-    python3 -m kauldron.main \
+    srun --nodes=1 --gpus=2 --ntasks=1 \
+    scripts/isambard_cuda13.sh python -m kauldron.main \
   --cfg=gemma/diffusion/hackable_diffusion_adapter/configs/sft_pubmedqa.py \
   --cfg.workdir=$(pwd)/xp_dir
 ```
@@ -181,7 +245,8 @@ env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
     NCCL_PROTO="LL128" \
     NCCL_NVLS_ENABLE="0" \
     NCCL_CUMEM_ENABLE="0" \
-    python3 -m kauldron.main \
+    srun --nodes=1 --gpus=2 --ntasks=1 \
+    scripts/isambard_cuda13.sh python -m kauldron.main \
   --cfg=gemma/diffusion/hackable_diffusion_adapter/configs/sft_sudoku.py \
   --cfg.workdir=$(pwd)/xp_dir
 ```
@@ -194,7 +259,8 @@ env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
     NCCL_PROTO="LL128" \
     NCCL_NVLS_ENABLE="0" \
     NCCL_CUMEM_ENABLE="0" \
-    python3 -m kauldron.main \
+    srun --nodes=1 --gpus=2 --ntasks=1 \
+    scripts/isambard_cuda13.sh python -m kauldron.main \
   --cfg=gemma/diffusion/hackable_diffusion_adapter/configs/sft_sudoku_full.py \
   --cfg.workdir=$(pwd)/xp_dir
 ```
@@ -209,13 +275,18 @@ on the eval dataset, and reports task-specific metrics.
 
 ### Running an Eval Job
 
-From the parent dir of the gemma directory:
+From the repository root on Isambard, using the same cached image:
 
 ```bash
 env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
     XLA_PYTHON_CLIENT_PREALLOCATE="false" \
-    TF_FORCE_GPU_ALLOW_GROWTH="true" \
-    python3 -m gemma.diffusion.hackable_diffusion_adapter.eval_main \
+    APPTAINERENV_TF_FORCE_GPU_ALLOW_GROWTH="true" \
+    NCCL_ALGO="Ring" \
+    NCCL_PROTO="LL128" \
+    NCCL_NVLS_ENABLE="0" \
+    NCCL_CUMEM_ENABLE="0" \
+    srun --nodes=1 --gpus=2 --ntasks=1 \
+    scripts/isambard_cuda13.sh python -m gemma.diffusion.hackable_diffusion_adapter.eval_main \
     --cfg=gemma/diffusion/hackable_diffusion_adapter/configs/sft_sudoku.py \
     --task=sudoku \
     --step=1000 \
@@ -242,7 +313,7 @@ env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
 ### Available Evaluators
 
 Evaluators are generated automatically by
-[`ar_eval.make_ar_evals`](gemma/diffusion/hackable_diffusion_adapter/eval/ar_eval.py).
+[`ar_eval.make_ar_evals`](eval/ar_eval.py).
 The naming convention is:
 
 *   `sample_ar_steps{N}` — AR sampling with `N` denoising steps
