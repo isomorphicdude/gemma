@@ -18,13 +18,13 @@ Flat configuration that contains all setup (model, LoRA,
 optimizer, checkpointer, dataset pipeline, and evaluation).
 """
 
+from gemma.diffusion import _paths
 from gemma.diffusion.hackable_diffusion_adapter.eval import ar_eval
 from kauldron import konfig
 
 # pylint: disable=g-import-not-at-top
 with konfig.imports():
   from gemma.diffusion import _models
-  from gemma.diffusion import _paths  # pytlint: disable=unused-import
   from gemma.diffusion.hackable_diffusion_adapter.data.sudoku import sudoku_data
   from gemma.diffusion.hackable_diffusion_adapter.eval import sudoku_eval
   from gemma.diffusion.hackable_diffusion_adapter.hd import gemma_checkpointer
@@ -67,6 +67,9 @@ def get_config():
   cfg.aux.stop_gradient_from_denoiser_to_encoder = False
   cfg.aux.encoder_loss_weight = 1.0
   cfg.aux.decoder_loss_weight = 1.0
+  # Base Gemma checkpoint for the init transform; override per machine with
+  # --cfg.aux.checkpoint_path=... (e.g. a locally provisioned copy).
+  cfg.aux.checkpoint_path = str(CHECKPOINT_PATH)
 
   cfg.aux.sudoku_prompt = (
       "<|turn>system Solve the following Sudoku puzzle. Empty cells are"
@@ -166,7 +169,7 @@ def get_config():
   ])
 
   cfg.init_transform = gemma_checkpointer.GemmaDiffusionCheckpointLoader(
-      path=CHECKPOINT_PATH,
+      path=cfg.ref.aux.checkpoint_path,
   )
 
   cfg.train_ds = sudoku_data.make_sudoku_ds(

@@ -282,13 +282,43 @@ copies):
 mkdir -p ~/.gemma/tokenizer
 curl -o ~/.gemma/tokenizer/tokenizer_gemma4.model \
     https://storage.googleapis.com/gemma-data/tokenizers/tokenizer_gemma4.model
-gcloud storage cp -r gs://gemma-data/checkpoints/diffusiongemma-26B-A4B-it /scratch/ckpts/
+gcloud storage rsync -r gs://gemma-data/checkpoints/diffusiongemma-26B-A4B-it \
+    /path/to/ckpts/diffusiongemma-26B-A4B-it
 # then add to the training command:
-#   --cfg.init_transform.path=/scratch/ckpts/diffusiongemma-26B-A4B-it
+#   --cfg.aux.checkpoint_path=/path/to/ckpts/diffusiongemma-26B-A4B-it
 ```
 
-The `--cfg.init_transform.path` override is a standard konfig override but has
-not been exercised yet.
+Verify the copy before training (no GPU needed):
+
+```bash
+du -sh /path/to/ckpts/diffusiongemma-26B-A4B-it  # expect ~37.6 GiB
+python -c "import orbax.checkpoint as ocp; \
+    print(ocp.PyTreeCheckpointer().metadata('/path/to/ckpts/diffusiongemma-26B-A4B-it'))"
+```
+
+Override the checkpoint path with `--cfg.aux.checkpoint_path=...` ( `sft_sudoku.py` stores the default in the plain-string field `cfg.aux.checkpoint_path` and wires `init_transform.path` to it via `cfg.ref)`. 
+
+> [!Note]
+> `sft_pubmedqa.py` and `sft_sudoku_full.py` still hardcode
+`CHECKPOINT_PATH` and lack the `aux.checkpoint_path` field.
+
+Provisioned on Isambard Phase 2 (project storage, visible from the compute
+nodes):
+
+* Checkpoint: downloaded on the login node on 2026-10-05 with
+  `gcloud storage rsync -r gs://gemma-data/checkpoints/diffusiongemma-26B-A4B-it /projects/u6tp/tw1320/diffgemma/gemma_weights/`
+  → pass `--cfg.aux.checkpoint_path=/projects/u6tp/tw1320/diffgemma/gemma_weights`
+  (the contents sit directly in `gemma_weights/`, see the `rsync` note above).
+* Tokenizer: stage it next to the weights so the run does not depend on
+  home-directory visibility from the compute nodes:
+
+  ```bash
+  mkdir -p /projects/u6tp/tw1320/diffgemma/gemma_cache/tokenizer
+  curl -o /projects/u6tp/tw1320/diffgemma/gemma_cache/tokenizer/tokenizer_gemma4.model \
+      https://storage.googleapis.com/gemma-data/tokenizers/tokenizer_gemma4.model
+  # then set in the training/eval environment:
+  #   GEMMA_CACHE_DIR=/projects/u6tp/tw1320/diffgemma/gemma_cache
+  ```
 
 ## Training
 
@@ -357,7 +387,11 @@ Metrics land in TensorBoard event files under the work directory.
    `jax[cuda12]` is an alternative that remains untested with this adapter and
    carries the upstream NCCL warning.
 4. Start-up needs internet for the checkpoint and tokenizer unless they are
-   provisioned locally as described above.
+   provisioned locally as described above. On Isambard Phase 2 the checkpoint
+   is staged at `/projects/u6tp/tw1320/diffgemma/gemma_weights` (and the
+   tokenizer under `/projects/u6tp/tw1320/diffgemma/gemma_cache`); runs there
+   must pass `--cfg.aux.checkpoint_path=...` and `GEMMA_CACHE_DIR=...` as
+   described above.
 5. `hackable-diffusion` is pinned to `8581c87`. Upstream HEAD (`d53bfcb`,
    2026-10-02) only adds `noise_frac` to the Gaussian DDIM step, which this
    adapter does not use, but future upstream changes to the adapter may
