@@ -18,6 +18,7 @@ Flat configuration that contains all setup (model, LoRA,
 optimizer, checkpointer, dataset pipeline, and evaluation).
 """
 
+import dataclasses
 from gemma.diffusion import _paths
 from gemma.diffusion.hackable_diffusion_adapter.eval import ar_eval
 from kauldron import konfig
@@ -42,8 +43,21 @@ with konfig.imports():
 CHECKPOINT_PATH = _paths.CheckpointPath.DIFFUSIONGEMMA_26B_A4B_IT
 
 
-def get_config():
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ConfigArgs:
+  """Structural options, read before `--cfg.*` overrides are applied.
+
+  Set with `--cfg=.../sft_sudoku.py:use_lora=False`; `--cfg.aux.use_lora` has
+  no effect.
+  """
+
+  use_lora: bool = True
+
+
+def get_config(args: ConfigArgs = ConfigArgs()):
   """SFT config for Sudoku solving."""
+  use_lora = args.use_lora
+
   cfg = kd.train.Trainer()
   cfg.seed = 42
   cfg.aux = {}
@@ -56,10 +70,8 @@ def get_config():
   cfg.aux.prompt_len = 256
   cfg.aux.num_canvases = 1
   cfg.aux.canvas_size = 256
-  use_lora = True
-  lora_rank = 8
-  cfg.aux.use_lora = use_lora
-  cfg.aux.lora_rank = lora_rank
+  cfg.aux.use_lora = use_lora  # Record only; set via ConfigArgs.
+  cfg.aux.lora_rank = 8
   cfg.aux.peak_lr = 1.5e-4
   cfg.aux.end_lr = cfg.ref.aux.peak_lr / 10
   cfg.aux.checkpoint_every_n_steps = 1000
@@ -88,7 +100,7 @@ def get_config():
   )
   if use_lora:
     gemma_network = lora.LoRA(
-        rank=lora_rank,
+        rank=cfg.ref.aux.lora_rank,
         model=base_network,
         target_modules="all-linear",
     )
@@ -114,6 +126,10 @@ def get_config():
   )
 
   cfg.train_losses = {
+      # Report Eq. 13: denoising CE  −(1/C) Σ_i log p_θ(x0_i | x_t, z_t, H)
+      # over ALL selected-canvas positions (clean and corrupted), uniform
+      # multinomial noise, t ~ U[ε,1−ε], no time weight. Proper scoring rule for
+      # q(x0_i | x_t); NOT an ELBO / likelihood bound.
       "diffusion_loss": core.KauldronLossWrapper(
           loss=discrete_loss.NoWeightDiscreteLoss(
               use_mask=True,
@@ -121,6 +137,9 @@ def get_config():
           ),
           weight=cfg.ref.aux.decoder_loss_weight,
       ),
+      # https://optax.readthedocs.io/en/latest/api/generated/optax.losses.softmax_cross_entropy_with_integer_labels.html
+      # CE = −(1/|mask|) Σ_i log p_θ(x_i | x_<i)
+      # computes the sum of log p_\theta (x)
       "encoder_loss": sft_model.EncoderARLoss(
           encoder_logits="preds.encoder_logits",
           encoder_target="preds.encoder_target",
@@ -148,7 +167,7 @@ def get_config():
       "lr": optax.scale_by_learning_rate(cfg.ref.schedules["learning_rate"]),
   })
 
-  if cfg.aux.use_lora:
+  if use_lora:
     cfg.optimizer = kd.optim.partial_updates(
         optimizer=_base_optimizer,
         mask=kd.optim.select("lora"),
@@ -252,6 +271,13 @@ def get_config():
       ),
   }
 
-  cfg.writer = safe_writer.SafeMetricWriter()
+  # cfg.writer = safe_writer.SafeMetricWriter()
+  cfg.writer = safe_writer.SafeWandbWriter(
+      wbproj="sudoku",
+      run_name_parts=(
+          {"lora": cfg.ref.aux.lora_rank} if use_lora else {"full": ""}
+      )
+      | {"seed": cfg.ref.seed, "steps": cfg.ref.num_train_steps},
+  )
 
   return cfg
