@@ -28,7 +28,7 @@ echo "==========================================================================
 # ---------------------------------------------------------------------------
 # Persistent locations (scratch is wiped, so checkpoints, data and the venv live outside it).
 # ---------------------------------------------------------------------------
-persist_root="/projects/u6tp/tw1320/diffgemma/"
+persist_root="/projects/u6tp/tw1320/diffgemma"
 data_root="${persist_root}/sudoku_data"
 pretrained_root="${persist_root}/gemma_weights"
 trained_root="${persist_root}/trained"
