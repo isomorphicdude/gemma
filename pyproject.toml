@@ -35,7 +35,10 @@ dependencies = [
     "absl-py",
     "bagz",
     "dialog>=1.1",
-    "etils[edc,enp,epath,epy,etree]",
+    # Fork: etils 1.14.0 (latest release) reads `jax._src.prng.KeyTy`, which
+    # jax 0.11 removed, so every ArraySpec fails. Pinned to the upstream fix
+    # (9 commits after 1.14.0, still versioned 1.14.0) until a release has it.
+    "etils[edc,enp,epath,epy,etree] @ git+https://github.com/google/etils.git@de6d7b24cece82cd49ccf1d8a5558001dcf01830",
     "einops",
     "grain ; sys_platform != 'win32'",
     # Fork: pinned to the commit the working environment was built with (see

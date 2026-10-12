@@ -8,18 +8,20 @@ live, how to move the work to another machine (including arm64 / GH200
 clusters), and what is known not to work. It complements, and where it differs
 overrides, the upstream instructions in the adapter README.
 
-Status as of 2026-10-02: `main` mirrors upstream `main` (commit `c490bec`);
-work happens on the `sudoku-sft` branch.
+`main` mirrors upstream `main`; work happens on the `sudoku-sft` branch. What
+has been verified on which machine, and cluster-specific state (drivers,
+staged checkpoint paths), is recorded in the adapter's
+[AGENT.md](gemma/diffusion/hackable_diffusion_adapter/AGENT.md#-verification-record).
 
 ## What this fork changes
 
 | File | Change |
 |---|---|
-| `pyproject.toml` | `hackable-diffusion` pinned to commit `8581c87` (upstream leaves it unpinned; its HEAD had already moved on 2026-10-02). |
+| `pyproject.toml` | `hackable-diffusion` pinned to commit `8581c87` (upstream leaves it unpinned; its HEAD had already moved on 2026-10-02). `etils` pinned to commit `de6d7b2` (the 1.14.0 release fails with jax 0.11, see the [installation notes](#installation-editable-with-uv)). |
 | `constraints.txt` | Exact versions of the working x86-64 environment (`uv pip freeze`), used as a constraints file. |
 | `excludes-aarch64.txt` | Packages to drop from resolution on arm64 (`tensorflow-cpu`, see [arm64](#arm64--gh200-clusters)). |
 | `.gitignore` | Prepared datasets (`*.bagz`, `*.jsonl`, `sudoku.csv`), `xp_dir*/` work directories, `.venv/`. |
-| `scripts/isambard_cuda13.sh` | Apptainer launcher for the ARM64 checkout's virtual environment and CUDA 13 forward compatibility. |
+| `scripts/isambard_cuda13.sh` | Apptainer launcher for the ARM64 checkout's virtual environment; uses the host CUDA driver, or CUDA 13 forward compatibility when the host driver is older. |
 | `scripts/check_cuda13.py` | Inspect loaded driver libraries and verify a compiled JAX GPU matrix product. |
 | `FORK_SETUP.md` | This document. |
 
@@ -35,7 +37,7 @@ cd gemma
 git remote add upstream https://github.com/google-deepmind/gemma.git
 ```
 
-* `origin` is the fork, `upstream` is DeepMind. Never push to `upstream`.
+* `origin` is the fork, `upstream` is DeepMind.
 * Keep `main` as an untouched mirror of upstream; branch from it for work.
 * Sync: `git fetch upstream && git merge upstream/main` (on the work branch).
 * Moving between machines is just commit, push, pull. With the editable install
@@ -87,21 +89,28 @@ Notes:
 * `constraints.txt` reproduces the environment that was built on the x86-64
   workstation: jax/jaxlib 0.11.2 with `jax-cuda13-plugin`, NCCL 2.32, cuDNN
   9.26, kauldron 1.4.4, flax 0.12.10, optax 0.2.8, grain 0.2.18, bagz 0.3.8,
-  tensorflow 2.21.0, numpy 2.5.3. On 2026-10-02 the environment was rebuilt
-  from this file with the commands above (269 packages); the editable import,
-  the GPU check, reading the prepared `.bagz` files and the config test all
-  passed.
+  tensorflow 2.21.0, numpy 2.5.3.
 * To refresh the constraints after a deliberate upgrade:
-  `uv pip freeze | grep -vE '^(gemma|hackable-diffusion) ' > constraints.txt`
-  (the two direct-URL entries must stay out, uv rejects a constraint whose URL
+  `uv pip freeze | grep -vE '^(gemma|hackable-diffusion|etils) ' > constraints.txt`
+  (the direct-URL entries must stay out, uv rejects a constraint whose URL
   differs from `pyproject.toml`).
-* The `hackable-diffusion` pin lives in `pyproject.toml`, not in the
-  constraints file, for the same reason.
+* The `hackable-diffusion` and `etils` pins live in `pyproject.toml`, not in
+  the constraints file, for the same reason.
+* `etils`: the latest release (1.14.0, 2026-03-04) reads the private
+  `jax._src.prng.KeyTy`, which jax 0.11 moved to `jax._src.random.prng`. Once
+  jax is imported, every `enp.ArraySpec` then raises
+  `AttributeError: module 'jax._src' has no attribute 'prng'`; Kauldron hits
+  it when it builds `train_ds.element_spec`, before the first training step.
+  `pyproject.toml` pins upstream commit `de6d7b2` ("use public JAX APIs for
+  detecting PRNG key dtypes", 9 commits after 1.14.0). It still reports
+  version 1.14.0, so the `etils==1.14.0` line in `constraints.txt` is
+  satisfied. Installing it needs access to github.com. Return to a PyPI
+  release once one includes the fix.
 * CUDA: the `jax[cuda13]` wheels bundle the CUDA 13 libraries. CUDA 13 needs
   NVIDIA driver 580 or newer on Linux for native compatibility
   ([CUDA release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/),
   [JAX install docs](https://docs.jax.dev/en/latest/installation.html)).
-  The workstation runs driver 595.71 (CUDA 13.2). Upstream warns that other
+  Upstream warns that other
   CUDA versions were not tested and can produce NCCL errors.
   Datacenter GPUs can also use CUDA forward compatibility; the validated
   Isambard setup is described [below](#isambard-ai-phase-2-apptainer-launcher).
@@ -110,11 +119,7 @@ Notes:
 
 ## arm64 / GH200 clusters
 
-Initial static checks on 2026-10-02 used PyPI metadata for every pinned package,
-a uv resolution targeting `aarch64-manylinux_2_28` / Python 3.12, and the `bagz`
-build files. See the Isambard section below for the current cluster setup.
-
-Result: the fork installs on arm64 once `tensorflow-cpu` is excluded; `bagz`
+The fork installs on arm64 once `tensorflow-cpu` is excluded; `bagz`
 compiles from source; all other 264 packages have Python 3.12 arm64 wheels at
 the versions in `constraints.txt`, including the JAX CUDA 13 stack. JAX lists
 NVIDIA GPUs on Linux aarch64 as supported.
@@ -132,13 +137,19 @@ Why each deviation:
   Excluding it loses nothing: the full `tensorflow` 2.21.0 wheel exists for
   arm64 and is pulled in anyway by `tensorflow-text`. Plain pip has no
   equivalent of `--excludes`; use uv.
+* **`opencv-python`** (required by `kauldron`) links X11/xcb/GL system
+  libraries (`libxcb.so.1`, `libGL.so.1`, ...) that the CUDA base container
+  lacks, so `import cv2` fails there. TFDS imports it optionally and catches
+  the error, but OpenCV's loader leaves `site-packages/cv2` on `sys.path` after
+  the failure. Grain's spawned data workers inherit that path, `import typing`
+  resolves to `cv2/typing`, and every worker dies on `libxcb.so.1`. Nothing in
+  this stack uses `cv2`, so it is excluded. If an existing venv has it:
+  `uv pip uninstall opencv-python`.
 * **`bagz`** 0.3.8 ships Linux wheels for x86-64 only. On arm64 pip/uv build it
   from the sdist: CMake 3.28+ (fetched automatically if the system one is
   older), a C++20 compiler, and internet access during the build. Nothing in
-  it is x86-specific and upstream ships macOS arm64 wheels. The Isambard ARM64
-  environment has `bagz` 0.3.8 installed, and the Sudoku config/data pipeline
-  checks pass in the container. If a build on another machine fails: `bagz` is
-  only imported by `data/sudoku/sudoku_data.py` (reader) and
+  it is x86-specific and upstream ships macOS arm64 wheels. If a build fails:
+  `bagz` is only imported by `data/sudoku/sudoku_data.py` (reader) and
   `data/sudoku/convert_sudoku.py` (writer). The on-disk format is simple
   (each record is a zstd frame, followed by a tail table of little-endian
   uint64 end offsets, the last 8 bytes giving the table start; verified on the
@@ -160,12 +171,6 @@ Checks to make on a new cluster:
 
 ## Isambard-AI Phase 2: Apptainer launcher
 
-The login shell checked on 2026-10-04 has no `LD_LIBRARY_PATH` or `CUDA_HOME`
-override. The system provides CUDA 11.8 and 12.6 modules; a GH200 compute node
-reports driver 565.57.01 and native CUDA support through 12.7. The installed
-ARM64 `.venv` uses JAX 0.11.2 and CUDA 13.4.92 wheels, so loading the system CUDA
-module does not make this environment compatible.
-
 Use the project launcher with Apptainer 1.4.1. It follows
 [Isambard's GPU container guidance](https://docs.isambard.ac.uk/user-documentation/guides/containers/apptainer/#using-gpus-with-apptainer)
 and the
@@ -173,11 +178,11 @@ and the
 The base image is NVIDIA `cuda:13.0.0-base-ubuntu24.04`, pinned by its ARM64
 manifest digest. It supplies R580 CUDA compatibility libraries and an Ubuntu
 runtime; Python and Gemma remain in the editable checkout's existing `.venv`.
-The CUDA 13.4.1 image was also tested, but its R615 compatibility driver fails
-`cuInit` on the cluster's R565 kernel driver with
-`CUDA_ERROR_SYSTEM_DRIVER_MISMATCH`. The older R580 compatibility driver is
-used with the newer wheel runtimes through
+An R580 driver (the image's 580.65.06 compatibility driver, or an R580 host
+driver) runs the newer wheel runtimes through
 [CUDA minor version compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html).
+Do not move to a newer image tag without a GPU workload check; the CUDA 13.4.1
+image already failed on this cluster (see the verification record).
 
 Download the image once on a login node, then check the actual JAX environment
 through Slurm on a GPU. Downloads from compute nodes can be much slower; image
@@ -198,25 +203,22 @@ repository root so relative dataset paths work.
 
 `--nv` exposes the GPU and binds host NVIDIA libraries into
 `/.singularity.d/libs`. The launcher uses `--cleanenv` to exclude host module and
-Python paths, then sets the container's `LD_LIBRARY_PATH` to
-`/usr/local/cuda/compat:/.singularity.d/libs` so the CUDA 13 driver libraries are
-selected first. The image's CUDA runtime library directory is excluded so the
-pinned `.venv` wheels supply their own newer CUDA runtime/math libraries. It
+Python paths. It then compares the host kernel driver version (from
+`/proc/driver/nvidia/version`) with the image's compatibility driver. Only when
+the compatibility driver is newer does it set the container's `LD_LIBRARY_PATH`
+to `/usr/local/cuda/compat:/.singularity.d/libs`; otherwise it sets
+`/.singularity.d/libs` alone and the host driver is used. A compatibility
+driver older than the kernel driver fails `cuInit` with
+`CUDA_ERROR_SYSTEM_DRIVER_MISMATCH` (803), and JAX then silently falls back to
+CPU. The image's CUDA runtime library directory is excluded so the pinned
+`.venv` wheels supply their own newer CUDA runtime/math libraries. It
 forwards Slurm's `CUDA_VISIBLE_DEVICES`, the documented XLA/NCCL training
 settings, and uses `.venv/bin` first in `PATH`. It does not add a global library-path override
 to the shell profile. The check forces the CUDA backend and disables GPU memory
 preallocation, prints the loaded `libcuda`, checks initialization and the matrix
 result, and runs an NCCL all-reduce when more than one GPU is allocated.
-
-Verified on 2026-10-04: the launcher selected `libcuda.so.580.65.06` (driver API
-13.0) and the wheel-provided CUDA 13.4 runtime (13040). On GH200 node
-`nid010327`, JAX 0.11.2 listed two `CudaDevice` instances and passed both a
-compiled matrix product and an all-reduce across the two GPUs. An inherited
-host CUDA 12.6 library path was deliberately set for this check; the container
-used only its compatibility and injected driver library directories.
-All nine existing Sudoku config and data-pipeline structure tests also passed
-through the launcher with the CPU backend. These checks do not load model
-weights or train the model.
+Results of these checks on the cluster, and its driver history, are in the
+[verification record](gemma/diffusion/hackable_diffusion_adapter/AGENT.md#-verification-record).
 
 Launch Sudoku SFT inside a Slurm job with the same tuning flags as above:
 
@@ -234,9 +236,12 @@ For an interactive session, use
 Additional application variables can be passed using `APPTAINERENV_<NAME>`;
 Apptainer's `--no-eval` keeps their values literal. This launcher is for a single
 node; multi-node transport and a full training run require separate validation.
+The compatibility driver is only a fallback for nodes whose driver is older
+than 580.65.06.
 [NVIDIA's current forward compatibility matrix](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
 does not list R565 as a supported target, even though Isambard documents this
-approach, so retain a workload check when changing the image or CUDA wheels.
+approach. Repeat the `--check` workload check when changing the image or the
+CUDA wheels, and after a cluster driver update.
 
 ## Data
 
@@ -302,23 +307,8 @@ Override the checkpoint path with `--cfg.aux.checkpoint_path=...` ( `sft_sudoku.
 > `sft_pubmedqa.py` and `sft_sudoku_full.py` still hardcode
 `CHECKPOINT_PATH` and lack the `aux.checkpoint_path` field.
 
-Provisioned on Isambard Phase 2 (project storage, visible from the compute
-nodes):
-
-* Checkpoint: downloaded on the login node on 2026-10-05 with
-  `gcloud storage rsync -r gs://gemma-data/checkpoints/diffusiongemma-26B-A4B-it /projects/u6tp/tw1320/diffgemma/gemma_weights/`
-  → pass `--cfg.aux.checkpoint_path=/projects/u6tp/tw1320/diffgemma/gemma_weights`
-  (the contents sit directly in `gemma_weights/`, see the `rsync` note above).
-* Tokenizer: stage it next to the weights so the run does not depend on
-  home-directory visibility from the compute nodes:
-
-  ```bash
-  mkdir -p /projects/u6tp/tw1320/diffgemma/gemma_cache/tokenizer
-  curl -o /projects/u6tp/tw1320/diffgemma/gemma_cache/tokenizer/tokenizer_gemma4.model \
-      https://storage.googleapis.com/gemma-data/tokenizers/tokenizer_gemma4.model
-  # then set in the training/eval environment:
-  #   GEMMA_CACHE_DIR=/projects/u6tp/tw1320/diffgemma/gemma_cache
-  ```
+The copies staged on Isambard Phase 2 are listed in the adapter's
+[AGENT.md](gemma/diffusion/hackable_diffusion_adapter/AGENT.md#6-isambard-staged-checkpoint-and-tokenizer).
 
 ## Training
 
@@ -374,12 +364,10 @@ Metrics land in TensorBoard event files under the work directory.
 
 ## Known limitations
 
-1. No training run has been done from this fork yet on any machine. The
-   x86-64 install procedure was verified by rebuilding the environment from
-   `constraints.txt` and running the import, GPU, data and config checks
-   above. The Isambard ARM64 environment passed the editable import, JAX GPU
-   matrix product, two-GPU all-reduce, and all nine Sudoku configuration tests
-   through Apptainer.
+1. No training run has completed from this fork yet on any machine. The
+   install, GPU, data and config checks that have passed, and the failed
+   training attempts, are listed in the
+   [verification record](gemma/diffusion/hackable_diffusion_adapter/AGENT.md#-verification-record).
 2. Other ARM64 installations still need a source build of `bagz`; see the
    arm64 section for the fallback.
 3. CUDA 13 wheels need a compatible driver or a validated CUDA forward
@@ -387,11 +375,8 @@ Metrics land in TensorBoard event files under the work directory.
    `jax[cuda12]` is an alternative that remains untested with this adapter and
    carries the upstream NCCL warning.
 4. Start-up needs internet for the checkpoint and tokenizer unless they are
-   provisioned locally as described above. On Isambard Phase 2 the checkpoint
-   is staged at `/projects/u6tp/tw1320/diffgemma/gemma_weights` (and the
-   tokenizer under `/projects/u6tp/tw1320/diffgemma/gemma_cache`); runs there
-   must pass `--cfg.aux.checkpoint_path=...` and `GEMMA_CACHE_DIR=...` as
-   described above.
+   provisioned locally as described above. The Isambard Phase 2 copies, and
+   the settings runs there must pass, are listed in AGENT.md.
 5. `hackable-diffusion` is pinned to `8581c87`. Upstream HEAD (`d53bfcb`,
    2026-10-02) only adds `noise_frac` to the Gaussian DDIM step, which this
    adapter does not use, but future upstream changes to the adapter may

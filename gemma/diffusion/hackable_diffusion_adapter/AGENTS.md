@@ -13,6 +13,8 @@ On Isambard-AI Phase 2:
 * Run GPU commands through Slurm and `scripts/isambard_cuda13.sh`, using the
   editable `.venv` and existing CUDA 13 constraints. Preserve Slurm's GPU
   selection and keep compatibility library paths inside the launcher.
+* Keep `etils` on the commit pinned in `pyproject.toml`; the PyPI 1.14.0
+  release fails with jax 0.11.
 * Use the playbook's `--check` and Sudoku config test commands for validation.
   The verified scope covers GPU computation, a two-GPU all-reduce, and nine
   config tests; full training and multi-node jobs remain untested.

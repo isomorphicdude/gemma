@@ -41,7 +41,7 @@ CheckpointedEvaluator = _checkpointed_evaluator.CheckpointedEvaluator
 
 # Override path finalization for GCS checkpoints.
 import orbax.checkpoint._src.path.step as _step_lib
-_step_lib.is_path_finalized = lambda path: True
+_step_lib.is_path_finalized = lambda *args, **kwargs: True
 
 
 ################################################################################

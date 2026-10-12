@@ -3,8 +3,6 @@
 #SBATCH --job-name=sudoku-sft
 #SBATCH --output=/projects/u6tp/tw1320/submit/out/sudoku_%A_%a.out
 #SBATCH --error=/projects/u6tp/tw1320/submit/out/sudoku_%A_%a.err
-# Single node only: one JAX process shards over all of the node's allocated GPUs.
-# Without --nodes=1, --gpus=2 may be split across two nodes.
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=2

@@ -5,7 +5,8 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 image=${GEMMA_CUDA13_IMAGE:-"$repo_root/.apptainer/cuda-13.0.0-arm64.sif"}
 # NVIDIA cuda:13.0.0-base-ubuntu24.04, pinned to its Linux ARM64 manifest.
-# Its R580 compat driver can initialize on Isambard's R565 kernel driver.
+# Its R580 compat driver (580.65.06) can initialize on the R565 kernel driver
+# Isambard ran until 2026-10-07; the host's 580.173.02 driver is used since.
 image_uri='docker://nvcr.io/nvidia/cuda@sha256:c33da1d7a948e960842549e344af32eed7d8be20d1922ff99b52c119b08c72a7'
 
 usage() {
@@ -92,10 +93,21 @@ exec apptainer exec "${options[@]}" "$image" /bin/bash --noprofile --norc -c '
     echo "The container is missing CUDA forward compatibility libraries." >&2
     exit 2
   fi
-  # --nv injects the older host driver into /.singularity.d/libs. Prefer compat.
+  # --nv injects the host driver into /.singularity.d/libs. Prefer compat only
+  # while it is newer than the host kernel driver: cuInit fails with
+  # CUDA_ERROR_SYSTEM_DRIVER_MISMATCH when the compat driver is the older one.
   # CUDA runtime/math libraries come from the pinned Python wheels. Exclude the
   # image runtime lib64 directory so it cannot override those newer libraries.
-  export LD_LIBRARY_PATH="$compat:/.singularity.d/libs"
+  host_driver=$(grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" /proc/driver/nvidia/version 2>/dev/null | head -n 1)
+  compat_driver=$(readlink -f "$compat/libcuda.so.1")
+  compat_driver=${compat_driver##*/libcuda.so.}
+  # use compat driver only if it is newer (sorted)
+  newest=$(printf "%s\n" "$host_driver" "$compat_driver" | sort -V | tail -n 1)
+  if [[ $newest == "$host_driver" ]]; then
+    export LD_LIBRARY_PATH=/.singularity.d/libs
+  else
+    export LD_LIBRARY_PATH="$compat:/.singularity.d/libs"
+  fi
   export VIRTUAL_ENV="$1"
   export PATH="$VIRTUAL_ENV/bin:$PATH"
   export PYTHONNOUSERSITE=1

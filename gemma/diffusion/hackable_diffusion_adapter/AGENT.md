@@ -51,8 +51,9 @@ limitations).
     `--excludes` (tested with 0.11.28). Plain pip has no equivalent of
     `--excludes`; use uv.
 *   A driver compatible with the CUDA 13 wheels, either natively (580+) or
-    through the validated Apptainer setup below. Isambard Phase 2 currently
-    has driver 565.57.01; loading its CUDA 11.8/12.6 modules is insufficient.
+    through the validated Apptainer setup below. Isambard Phase 2 compute
+    nodes run driver 580.173.02 since 2026-10-07 (565.57.01 before); loading
+    its CUDA 11.8/12.6 modules is insufficient.
 *   Apptainer for the Isambard launcher (tested with 1.4.1).
 *   glibc 2.28 or newer (`ldd --version`).
 *   Internet access during provisioning. The current ARM64 environment has
@@ -109,17 +110,22 @@ starting GPU jobs; `--pull` limits image compression to two CPU threads.
 The default cache is `.apptainer/cuda-13.0.0-arm64.sif` (git-ignored).
 To use project storage, set `GEMMA_CUDA13_IMAGE` to the same absolute SIF path
 for provisioning and execution. Stage checkpoints and tokenizers before
-training as described in [FORK_SETUP.md](../../../FORK_SETUP.md).
+training; see [step 6](#6-isambard-staged-checkpoint-and-tokenizer).
 
 The launcher pins NVIDIA `cuda:13.0.0-base-ubuntu24.04` by its ARM64 manifest
-digest. Its R580 compatibility `libcuda` works with the installed JAX 0.11.2
-and CUDA 13.4.92 wheels. The CUDA 13.4.1 image's R615 compatibility driver
+digest. Its R580 compatibility `libcuda` (580.65.06) and the host's 580.173.02
+driver both work with the installed JAX 0.11.2 and CUDA 13.4.92 wheels. The
+CUDA 13.4.1 image's R615 compatibility driver
 failed `cuInit` with `CUDA_ERROR_SYSTEM_DRIVER_MISMATCH` on this cluster;
 do not replace the image with a newer tag without a GPU workload check.
 
-Apptainer runs with `--nv --cleanenv --no-eval`. Inside the container,
-`LD_LIBRARY_PATH=/usr/local/cuda/compat:/.singularity.d/libs` selects the
-compatibility driver before the injected host driver. CUDA runtime/math
+Apptainer runs with `--nv --cleanenv --no-eval`. Inside the container, the
+launcher puts `/usr/local/cuda/compat` before the injected host driver
+(`/.singularity.d/libs`) only when the compatibility driver is newer than the
+host kernel driver; otherwise `LD_LIBRARY_PATH=/.singularity.d/libs`. A
+compatibility driver older than the kernel driver fails `cuInit` with
+`CUDA_ERROR_SYSTEM_DRIVER_MISMATCH` and JAX falls back to CPU, which broke
+the Sudoku jobs after the 2026-10-07 driver update. CUDA runtime/math
 libraries come from the pinned `.venv` wheels, so the image's CUDA runtime
 directory is excluded. Keep this library path local to the launcher;
 do not add it to shell profiles or prepend system CUDA module paths.
@@ -129,13 +135,13 @@ Respect the allocation's `CUDA_VISIBLE_DEVICES`; do not replace it with a
 hard-coded GPU index. Use `APPTAINERENV_<NAME>` for additional application
 variables that the launcher does not explicitly forward.
 
-Verified on 2026-10-04: `libcuda.so.580.65.06`, the wheel-provided CUDA 13.4
-runtime, a JAX GPU matrix product, a two-GPU NCCL/JAX all-reduce, and all nine
-Sudoku config tests. The GPU check forces the CUDA backend and checks
-`cuInit`, imported Gemma location, and computed results; a driver API version
-or device listing alone is insufficient. Full training and multi-node jobs
-remain untested. See [FORK_SETUP.md](../../../FORK_SETUP.md#isambard-ai-phase-2-apptainer-launcher)
-for the compatibility support caveat and detailed validation record.
+The GPU check forces the CUDA backend and checks `cuInit`, imported Gemma
+location, and computed results; a driver API version or device listing alone
+is insufficient. What has passed on this cluster is in the
+[verification record](#-verification-record); full training and multi-node
+jobs remain untested. See
+[FORK_SETUP.md](../../../FORK_SETUP.md#isambard-ai-phase-2-apptainer-launcher)
+for the compatibility support caveat.
 
 ### 5. Verify the editable import and Sudoku config
 
@@ -151,9 +157,35 @@ srun --nodes=1 --gpus=1 --ntasks=1 --time=00:05:00 \
 
 > **CUDA package consistency:** keep the existing CUDA 13 environment and
 > `constraints.txt` pins. Do not mix in CUDA 12 plugins or libraries such as
-> `jax-cuda12-plugin` or `nvidia-nccl-cu12`, or downgrade JAX/CUDA merely to
-> match Isambard's native driver. Use the validated compatibility launcher
-> and repeat its GPU check when changing the image or CUDA wheels.
+> `jax-cuda12-plugin` or `nvidia-nccl-cu12`. Keep `etils` on the commit pinned
+> in `pyproject.toml`: the PyPI 1.14.0 release fails with jax 0.11
+> (`module 'jax._src' has no attribute 'prng'`). Use the launcher and repeat
+> its GPU check when changing the image or CUDA wheels, and after a cluster
+> driver update.
+
+### 6. Isambard: staged checkpoint and tokenizer
+
+Both are staged in project storage, visible from the compute nodes (generic
+offline provisioning steps are in
+[FORK_SETUP.md](../../../FORK_SETUP.md#base-checkpoint-and-tokenizer)):
+
+*   Checkpoint: downloaded on the login node on 2026-10-05 with
+    `gcloud storage rsync -r gs://gemma-data/checkpoints/diffusiongemma-26B-A4B-it /projects/u6tp/tw1320/diffgemma/gemma_weights/`
+    (the contents sit directly in `gemma_weights/`). Pass
+    `--cfg.aux.checkpoint_path=/projects/u6tp/tw1320/diffgemma/gemma_weights`.
+*   Tokenizer: stage it next to the weights so the run does not depend on
+    home-directory visibility from the compute nodes:
+
+    ```bash
+    mkdir -p /projects/u6tp/tw1320/diffgemma/gemma_cache/tokenizer
+    curl -o /projects/u6tp/tw1320/diffgemma/gemma_cache/tokenizer/tokenizer_gemma4.model \
+        https://storage.googleapis.com/gemma-data/tokenizers/tokenizer_gemma4.model
+    # The launcher's --cleanenv drops GEMMA_CACHE_DIR; forward it explicitly:
+    export APPTAINERENV_GEMMA_CACHE_DIR=/projects/u6tp/tw1320/diffgemma/gemma_cache
+    ```
+
+[`scripts/slurm_sudoku.sh`](../../../scripts/slurm_sudoku.sh) already passes
+both.
 
 ---
 
@@ -349,3 +381,52 @@ Metrics for each evaluator appear under the corresponding eval name
 *   **Evaluate on host side for complex metrics**: Custom evaluation metrics
     MUST inherit from `BaseTextMetric` or `BaseSimpleTextMetric` and execute
     calculations inside `io_callback` on CPU to prevent device-side OOM.
+
+---
+
+## ✅ Verification Record
+
+What has been checked, where, and when. Append new results here rather than
+in FORK_SETUP.md.
+
+### Fork baseline
+
+*   `main` last synced with upstream at `c490bec` (2026-10-02).
+
+
+### arm64 static checks
+
+*   2026-10-02: PyPI metadata for every pinned package, a uv resolution
+    targeting `aarch64-manylinux_2_28` / Python 3.12, and the `bagz` build
+    files. Result: installs once `tensorflow-cpu` is excluded; `bagz`
+    compiles from source; all other 264 packages have arm64 wheels.
+
+### Isambard-AI Phase 2
+
+*   Driver history: GH200 compute nodes ran 565.57.01 (native CUDA through
+    12.7) until 2026-10-07. They were rebooted 2026-10-07 to 09; node
+    `nid010046` reported 580.173.02 (native CUDA 13.0) on 2026-10-11.
+*   The CUDA 13.4.1 image was tested: its R615 compatibility driver failed
+    `cuInit` on the R565 kernel driver with
+    `CUDA_ERROR_SYSTEM_DRIVER_MISMATCH`.
+*   2026-10-04, node `nid010327`: the launcher selected
+    `libcuda.so.580.65.06` (driver API 13.0) and the wheel-provided CUDA 13.4
+    runtime (13040). JAX 0.11.2 listed two `CudaDevice` instances and passed a
+    compiled matrix product and an all-reduce across the two GPUs. An
+    inherited host CUDA 12.6 library path was deliberately set for this
+    check; the container used only its compatibility and injected driver
+    library directories. All nine Sudoku config and data-pipeline structure
+    tests passed through the launcher with the CPU backend; `bagz` 0.3.8 is
+    installed in the ARM64 `.venv`. These checks did not load model weights
+    or train the model.
+*   2026-10-11, node `nid010046`, after the driver update: the previous
+    launcher always preferred the compatibility driver, so JAX silently fell
+    back to CPU. The compatibility `libcuda.so.580.65.06` failed `cuInit` with
+    `CUDA_ERROR_SYSTEM_DRIVER_MISMATCH`; the same image with only the host
+    `libcuda.so.580.173.02` listed a `CudaDevice` and passed the compiled
+    matrix product. The updated launcher's `--check` then passed.
+*   2026-10-11: the first Slurm training attempts (jobs 7254375 and 7254801)
+    failed before the first step, from the CUDA driver mismatch above and the
+    `etils` `jax._src.prng` error. Both are fixed (updated launcher, `etils`
+    pin); no training run has completed since.
+*   Untested: full training runs and multi-node jobs.
