@@ -37,6 +37,7 @@ def make_ar_evals(
     corruption_process_ref,
     canvas_size_ref,
     metrics: dict[str, Any] | None = None,
+    summaries: dict[str, Any] | None = None,
     max_num_canvases: int = 8,
     denoising_steps: list[int] | None = None,
     use_early_stopping: bool = False,
@@ -49,6 +50,8 @@ def make_ar_evals(
     corruption_process_ref: cfg.ref pointing to the corruption process.
     canvas_size_ref: cfg.ref pointing to the canvas size.
     metrics: Dict of metric objects.  Defaults to ``{}`` (no metrics).
+    summaries: Extra summaries (e.g. images), added to the default text
+      samples summary.
     max_num_canvases: Maximum number of AR canvases to generate.
     denoising_steps: List of step counts.  Defaults to AR_DENOISING_STEPS.
     use_early_stopping: Whether to use early stopping based on entropy.
@@ -118,6 +121,7 @@ def make_ar_evals(
                 response="samples",
                 num_texts=10,
             ),
+            **(summaries or {}),
         },
     )
 

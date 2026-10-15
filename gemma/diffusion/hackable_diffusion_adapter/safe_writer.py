@@ -118,7 +118,19 @@ class SafeWandbWriter(SafeMetricWriter):
                     for k, v in scalars.items()
                 }
             )
-        #TODO: add logging of sudoku grid images
+
+    def write_images(self, step, images) -> None:
+        super().write_images(step, images)
+        if self._wandb is not None and images:
+            logged = {}
+            for k, batch in images.items():
+                batch = np.asarray(batch)
+                if np.issubdtype(batch.dtype, np.floating):
+                    batch = (np.clip(batch, 0.0, 1.0) * 255).astype(np.uint8)
+                logged[f"{self.collection}/{k}"] = [
+                    self._wandb.Image(img) for img in batch
+                ]
+            self._wandb.log({"step": step} | logged)
 
     def write_config(self, config) -> None:
         super().write_config(config)

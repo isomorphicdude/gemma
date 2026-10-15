@@ -231,12 +231,22 @@ def get_config(args: ConfigArgs = ConfigArgs()):
       ),
   })
 
+  eval_summaries = {
+      "sudoku_boards": sudoku_eval.SudokuBoardImages(
+          tokens="samples",
+          ground_truth="batch.solution_tokens",
+          puzzle="batch.puzzle_tokens",
+          extraction_mode=sudoku_eval.ExtractionMode.THINKING,
+      ),
+  }
+
   all_evals = ar_eval.make_ar_evals(
       cfg,
       gemma_network_ref=cfg.ref.model.gemma_network,
       corruption_process_ref=cfg.ref.aux.corruption_process,
       canvas_size_ref=cfg.ref.aux.canvas_size,
       metrics=eval_metrics,
+      summaries=eval_summaries,
       max_num_canvases=cfg.ref.aux.num_canvases,
       use_early_stopping=False,
   )
@@ -246,6 +256,7 @@ def get_config(args: ConfigArgs = ConfigArgs()):
       corruption_process_ref=cfg.ref.aux.corruption_process,
       canvas_size_ref=cfg.ref.aux.canvas_size,
       metrics=eval_metrics,
+      summaries=eval_summaries,
       max_num_canvases=cfg.ref.aux.num_canvases,
       use_early_stopping=True,
   )

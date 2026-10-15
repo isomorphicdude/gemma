@@ -112,9 +112,25 @@ def _pubmedqa_metrics():
   }
 
 
+def _sudoku_summaries():
+  """Return task-specific summaries (board images) for the Sudoku config."""
+  return {
+      "sudoku_boards": sudoku_eval_cfg.SudokuBoardImages(
+          tokens="samples",
+          ground_truth="batch.solution_tokens",
+          puzzle="batch.puzzle_tokens",
+          extraction_mode=sudoku_eval_cfg.ExtractionMode.SFT,
+      ),
+  }
+
+
 _TASK_METRICS = {
     "sudoku": _sudoku_metrics,
     "pubmedqa": _pubmedqa_metrics,
+}
+
+_TASK_SUMMARIES = {
+    "sudoku": _sudoku_summaries,
 }
 
 
@@ -133,6 +149,9 @@ def _inject_ar_evals(cfg, task):
   eval_metrics = _denoising_metrics()
   if task_metrics_fn := _TASK_METRICS.get(task):
     eval_metrics.update(task_metrics_fn())
+  eval_summaries = {}
+  if task_summaries_fn := _TASK_SUMMARIES.get(task):
+    eval_summaries.update(task_summaries_fn())
 
   all_evals = ar_eval.make_ar_evals(
       cfg,
@@ -140,6 +159,7 @@ def _inject_ar_evals(cfg, task):
       corruption_process_ref=cfg.ref.aux.corruption_process,
       canvas_size_ref=cfg.ref.aux.canvas_size,
       metrics=eval_metrics,
+      summaries=eval_summaries,
       max_num_canvases=cfg.ref.aux.num_canvases,
       use_early_stopping=False,
   )
@@ -149,6 +169,7 @@ def _inject_ar_evals(cfg, task):
       corruption_process_ref=cfg.ref.aux.corruption_process,
       canvas_size_ref=cfg.ref.aux.canvas_size,
       metrics=eval_metrics,
+      summaries=eval_summaries,
       max_num_canvases=cfg.ref.aux.num_canvases,
       use_early_stopping=True,
   )
