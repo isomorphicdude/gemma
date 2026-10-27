@@ -1,0 +1,268 @@
+"""Text diffusion SFT config — Nurikabe dataset."""
+
+import dataclasses
+from gemma.diffusion import _paths
+from gemma.diffusion.hackable_diffusion_adapter.eval import ar_eval
+from kauldron import konfig
+
+# pylint: disable=g-import-not-at-top
+with konfig.imports():
+  from gemma.diffusion import _models
+  from gemma.diffusion.hackable_diffusion_adapter.data.sudoku import sudoku_data
+  from gemma.diffusion.hackable_diffusion_adapter.hd import gemma_checkpointer
+  from gemma.diffusion.hackable_diffusion_adapter.hd import hd_gemma_network
+  from gemma.diffusion.hackable_diffusion_adapter.hd import lora
+  from gemma.diffusion.hackable_diffusion_adapter.hd import sft_model
+  from hackable_diffusion import hd
+  from hackable_diffusion.kdiff import core
+  from hackable_diffusion.lib.training import discrete_loss
+  from kauldron import kd
+  import optax
+  from gemma.diffusion.hackable_diffusion_adapter import safe_writer
+# pylint: enable=g-import-not-at-top
+
+CHECKPOINT_PATH = _paths.CheckpointPath.DIFFUSIONGEMMA_26B_A4B_IT
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ConfigArgs:
+  """Structural options, read before `--cfg.*` overrides are applied.
+
+  Set with `--cfg=.../sft_nurikabe.py:use_lora=False`; `--cfg.aux.use_lora` has
+  no effect.
+  """
+
+  use_lora: bool = True
+
+
+def get_config(args: ConfigArgs = ConfigArgs()):
+  """SFT config for Nurikabe solving."""
+  use_lora = args.use_lora
+
+  cfg = kd.train.Trainer()
+  cfg.seed = 42
+  cfg.aux = {}
+  cfg.aux.vocab_size = 262_144  # Gemma4 vocabulary size
+
+  cfg.aux.corruption_process = hd.corruption.CategoricalProcess.uniform_process(
+      num_categories=cfg.ref.aux.vocab_size,
+      schedule=hd.corruption.LinearDiscreteSchedule(),
+  )
+  cfg.aux.prompt_len = 256
+  cfg.aux.num_canvases = 1
+  cfg.aux.canvas_size = 256
+  cfg.aux.use_lora = use_lora  # Record only; set via ConfigArgs.
+  cfg.aux.lora_rank = 8
+  cfg.aux.peak_lr = 1.5e-4
+  cfg.aux.end_lr = cfg.ref.aux.peak_lr / 10
+  cfg.aux.checkpoint_every_n_steps = 1000
+  cfg.aux.eval_num_batches = None
+  cfg.aux.stop_gradient_from_denoiser_to_encoder = False
+  cfg.aux.encoder_loss_weight = 1.0
+  cfg.aux.decoder_loss_weight = 1.0
+  # Base Gemma checkpoint for the init transform; override per machine with
+  # --cfg.aux.checkpoint_path=... (e.g. a locally provisioned copy).
+  cfg.aux.checkpoint_path = str(CHECKPOINT_PATH)
+
+  cfg.aux.nurikabe_prompt = (
+      "<|turn>system Solve the following 10x10 Nurikabe puzzle. ? marks"
+      " unknown cells; numbers are island-size clues. Output ONLY 100"
+      " space-separated cells in row-major order: # for sea (black), and"
+      " the island size (1-10) for every island cell (white). Preserve clues."
+      " No explanations or code fences.<turn|>\n<|turn>user"
+      " {text}<turn|>\n<|turn>model\n"
+  )
+
+  cfg.sharding = kd.sharding.ShardingStrategy(
+      params=kd.sharding.FSDPSharding(), opt_state=kd.sharding.FSDPSharding()
+  )
+
+  base_network = hd_gemma_network.WrappedDiffusionGemmaNetwork(
+      gemma_model=_models.DiffusionGemma_26B_A4B(),
+  )
+  if use_lora:
+    gemma_network = lora.LoRA(
+        rank=cfg.ref.aux.lora_rank,
+        model=base_network,
+        target_modules="all-linear",
+    )
+  else:
+    gemma_network = base_network
+
+  cfg.model = sft_model.SFTDiffusion(
+      x0="batch.canvas",
+      prompt="batch.prompt",
+      canvas_id="batch.canvas_id",
+      canvas_mask="batch.canvas_mask",
+      encoder_target="batch.encoder_target",
+      encoder_target_mask="batch.encoder_target_mask",
+      corruption_process=cfg.ref.aux.corruption_process,
+      time_sampler=hd.training.time_sampling.UniformTimeSampler(
+          span=hd.jax_helpers.SafeSpan(safety_epsilon=1e-4)
+      ),
+      gemma_network=gemma_network,
+      prompt_len=cfg.ref.aux.prompt_len,
+      canvas_size=cfg.ref.aux.canvas_size,
+      num_canvases=cfg.ref.aux.num_canvases,
+      stop_gradient_from_denoiser_to_encoder=cfg.ref.aux.stop_gradient_from_denoiser_to_encoder,
+  )
+
+  cfg.train_losses = {
+      # Report Eq. 13: denoising CE  −(1/C) Σ_i log p_θ(x0_i | x_t, z_t, H)
+      # over ALL selected-canvas positions (clean and corrupted), uniform
+      # multinomial noise, t ~ U[ε,1−ε], no time weight. Proper scoring rule for
+      # q(x0_i | x_t); NOT an ELBO / likelihood bound.
+      "diffusion_loss": core.KauldronLossWrapper(
+          loss=discrete_loss.NoWeightDiscreteLoss(
+              use_mask=True,
+              mask_key="target_mask",
+          ),
+          weight=cfg.ref.aux.decoder_loss_weight,
+      ),
+      # https://optax.readthedocs.io/en/latest/api/generated/optax.losses.softmax_cross_entropy_with_integer_labels.html
+      # CE = −(1/|mask|) Σ_i log p_θ(x_i | x_<i)
+      # computes the sum of log p_\theta (x)
+      "encoder_loss": sft_model.EncoderARLoss(
+          encoder_logits="preds.encoder_logits",
+          encoder_target="preds.encoder_target",
+          encoder_target_mask="preds.encoder_target_mask",
+          weight=cfg.ref.aux.encoder_loss_weight,
+      ),
+  }
+
+  cfg.num_train_steps = 2_000
+
+  cfg.schedules = {
+      "learning_rate": optax.warmup_cosine_decay_schedule(
+          init_value=0.0,
+          peak_value=cfg.ref.aux.peak_lr,
+          end_value=cfg.ref.aux.end_lr,
+          warmup_steps=100,
+          decay_steps=cfg.ref.num_train_steps,
+      ),
+  }
+
+  _base_optimizer = kd.optim.named_chain(**{
+      "clip": optax.clip_by_global_norm(max_norm=1.0),
+      "adam": optax.scale_by_adam(b1=0.95, b2=0.99, eps=1e-8),
+      "decay": optax.add_decayed_weights(weight_decay=1e-4),
+      "lr": optax.scale_by_learning_rate(cfg.ref.schedules["learning_rate"]),
+  })
+
+  if use_lora:
+    cfg.optimizer = kd.optim.partial_updates(
+        optimizer=_base_optimizer,
+        mask=kd.optim.select("lora"),
+    )
+  else:
+    cfg.optimizer = _base_optimizer
+
+  cfg.checkpointer = kd.ckpts.Checkpointer(
+      fast=False,
+      save_interval_steps=cfg.ref.aux.checkpoint_every_n_steps,
+      max_to_keep=5,
+  )
+
+  cfg._konfig_experimental_nofreeze = True  # pylint: disable=protected-access
+  cfg.rng_streams = kd.train.RngStreams([
+      kd.train.RngStream("default", train=True, eval=True),
+      kd.train.RngStream("sampling", train=True, eval=True),
+  ])
+
+  cfg.init_transform = gemma_checkpointer.GemmaDiffusionCheckpointLoader(
+      path=cfg.ref.aux.checkpoint_path,
+  )
+
+  # The shared Bagz text pipeline also handles Nurikabe with an explicit prompt.
+  cfg.train_ds = sudoku_data.make_sudoku_ds(
+      bagz_path=(
+          "gemma/diffusion/hackable_diffusion_adapter/data/nurikabe/"
+          "nurikabe_train.bagz"
+      ),
+      training=True,
+      batch_size=2,
+      prompt_len=cfg.ref.aux.prompt_len,
+      num_canvases=cfg.ref.aux.num_canvases,
+      canvas_size=cfg.ref.aux.canvas_size,
+      prompt_template=cfg.ref.aux.nurikabe_prompt,
+  )
+  cfg.eval_ds = sudoku_data.make_sudoku_ds(
+      bagz_path=(
+          "gemma/diffusion/hackable_diffusion_adapter/data/nurikabe/"
+          "nurikabe_eval.bagz"
+      ),
+      training=False,
+      batch_size=2,
+      prompt_len=cfg.ref.aux.prompt_len,
+      num_canvases=cfg.ref.aux.num_canvases,
+      canvas_size=cfg.ref.aux.canvas_size,
+      slice_stop=256,
+      prompt_template=cfg.ref.aux.nurikabe_prompt,
+  )
+
+  # Nurikabe scoring is not implemented yet; do not apply Sudoku-only metrics.
+  eval_metrics = {
+      "processed_denoising_steps": kd.metrics.SingleDimension(
+          tensor="processed_denoising_steps", index=None
+      ),
+      "processed_num_canvases": kd.metrics.SingleDimension(
+          tensor="processed_num_canvases", index=None
+      ),
+      "average_denoising_steps_per_canvas": kd.metrics.SingleDimension(
+          tensor="average_denoising_steps_per_canvas", index=None
+      ),
+  }
+  eval_summaries = {}
+
+  all_evals = ar_eval.make_ar_evals(
+      cfg,
+      gemma_network_ref=cfg.ref.model.gemma_network,
+      corruption_process_ref=cfg.ref.aux.corruption_process,
+      canvas_size_ref=cfg.ref.aux.canvas_size,
+      metrics=eval_metrics,
+      summaries=eval_summaries,
+      max_num_canvases=cfg.ref.aux.num_canvases,
+      use_early_stopping=False,
+  )
+  early_stopping_evals = ar_eval.make_ar_evals(
+      cfg,
+      gemma_network_ref=cfg.ref.model.gemma_network,
+      corruption_process_ref=cfg.ref.aux.corruption_process,
+      canvas_size_ref=cfg.ref.aux.canvas_size,
+      metrics=eval_metrics,
+      summaries=eval_summaries,
+      max_num_canvases=cfg.ref.aux.num_canvases,
+      use_early_stopping=True,
+  )
+  all_evals.update(early_stopping_evals)
+  if use_lora:
+    # We only save the fused parameters.
+    checkpointer_kwargs = {
+        "write_original_params": False,
+        "write_lora_params": False,
+        "write_fused_lora_params": True,
+    }
+  else:
+    # We only save the original parameters.
+    checkpointer_kwargs = {
+        "write_original_params": True,
+        "write_lora_params": False,
+        "write_fused_lora_params": False,
+    }
+  cfg.evals = {
+      "gemma_checkpointer": gemma_checkpointer.GemmaCheckpointFormatter(
+          run=kd.evals.StandaloneEveryCheckpoint(),
+          **checkpointer_kwargs,
+      ),
+  }
+
+  # cfg.writer = safe_writer.SafeMetricWriter()
+  cfg.writer = safe_writer.SafeWandbWriter(
+      wbproj="nurikabe",
+      run_name_parts=(
+          {"lora": cfg.ref.aux.lora_rank} if use_lora else {"full": ""}
+      )
+      | {"seed": cfg.ref.seed, "steps": cfg.ref.num_train_steps},
+  )
+
+  return cfg
