@@ -22,6 +22,7 @@ The project is structured as a standard Python/JAX package.
     *   [`sft_sudoku.py`](configs/sft_sudoku.py): LoRA-based SFT training for the Sudoku puzzle solving task.
     *   [`sft_sudoku_full.py`](configs/sft_sudoku_full.py): Full weight SFT training for the Sudoku puzzle solving task (no LoRA).
     *   [`sft_pubmedqa.py`](configs/sft_pubmedqa.py): LoRA-based SFT training for the PubMedQA long-answer task.
+    *   [`sft_nurikabe.py`](configs/sft_nurikabe.py): LoRA-based SFT training for 10x10 Nurikabe (reuses the Sudoku Bagz pipeline with its own prompt).
 *   **`data/`**: Dataset loading, custom pipelines, and preprocessing transforms.
     *   [`data.py`](data/data.py): Common transforms (e.g. `CanvasChunker` for localized diffusion).
 *   **`hd/`**: Core modeling, network layers, and state handling.
@@ -30,6 +31,7 @@ The project is structured as a standard Python/JAX package.
     *   [`mask_helpers.py`](hd/mask_helpers.py): Right-pad causal/block masks and cursor tracking.
 *   **`eval/`**: Custom evaluation metrics designed to avoid TPU/GPU OOM issues.
     *   [`sudoku_eval.py`](eval/sudoku_eval.py): Unified host-side `SudokuAllMetrics` evaluation.
+    *   [`nurikabe_eval.py`](eval/nurikabe_eval.py): Host-side `NurikabeAllMetrics` and `NurikabeBoardImages`, scored with [`nurikabe_verify.py`](eval/nurikabe_verify.py) and drawn with [`nurikabe_viz.py`](eval/nurikabe_viz.py).
 
 ---
 
@@ -217,6 +219,21 @@ bash prepare_sudoku_dataset.sh
 cd -
 ```
 
+### Nurikabe Dataset
+Public on the Hugging Face Hub; needs the `hf` CLI but no token. From the
+repository root, this downloads the JSONL splits next to the converter and
+writes `nurikabe_{train,eval,test}.bagz` there (see
+[data/README.md](data/README.md#converting-nurikabe)):
+
+```bash
+PATH="$(pwd)/.venv/bin:$PATH" \
+    bash gemma/diffusion/hackable_diffusion_adapter/data/nurikabe/prepare_nurikabe_dataset.sh
+```
+
+On Isambard, [`scripts/slurm_nurikabe.sh`](../../../scripts/slurm_nurikabe.sh)
+reads the Bagz files from `/projects/u6tp/tw1320/diffgemma/nurikabe_data/`;
+copy them there after converting.
+
 ---
 
 ## 🧪 Running Unit Tests
@@ -297,6 +314,51 @@ env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
   --cfg.workdir=$(pwd)/xp_dir
 ```
 
+#### Nurikabe (with LoRA)
+
+[`scripts/slurm_nurikabe.sh`](../../../scripts/slurm_nurikabe.sh) passes the
+staged checkpoint, data and tokenizer paths. Extra arguments are forwarded to
+`kauldron.main`, so a short run without checkpoints (37 GiB each) is:
+
+```bash
+NURIKABE_WORKDIR=/projects/u6tp/tw1320/diffgemma/trained/nurikabe_smoke \
+sbatch --time=00:40:00 scripts/slurm_nurikabe.sh \
+    --cfg.num_train_steps=150 --cfg.log_metrics_every=10 \
+    '--cfg.checkpointer=py::kauldron.checkpoints:NoopCheckpointer()' \
+    '--cfg.evals=py::{}' --cfg.writer.mode=disabled
+```
+
+`num_train_steps` must exceed the 100 warmup steps, or the cosine schedule
+fails with `decay_steps=0`. Without arguments it trains 2000 steps.
+
+For a full run followed by evaluation, submit both jobs at once:
+
+```bash
+bash scripts/submit_nurikabe.sh
+```
+
+It creates `trained/nurikabe_lora_<UTC time>_<suffix>/`, trains into it, and
+queues [`scripts/slurm_nurikabe-eval.sh`](../../../scripts/slurm_nurikabe-eval.sh)
+with `afterok`. The eval job restores the newest committed checkpoint
+(`NURIKABE_EVAL_STEP=latest`, or a step number) and runs
+`eval_main --task=nurikabe` with `sample_ar_steps64` on the 256-example eval
+slice (42 min on two GPUs; `NURIKABE_EVAL_NUM_BATCHES` shortens it). Both jobs log to the same wandb run in `diffgemma-nurikabe`,
+because the run ID is derived from the workdir. The eval script can also be
+submitted alone with `NURIKABE_WORKDIR=<run dir>`.
+
+The run size defaults to 2000 steps at global batch 2 on two GPUs. Set
+`NURIKABE_TRAIN_STEPS`, `NURIKABE_BATCH_SIZE` (global) and
+`NURIKABE_TRAIN_GPUS` to change it; both jobs read the step count, which is
+part of the wandb run name. For example, 30K examples on a full node, still
+one example per GPU:
+
+```bash
+NURIKABE_TRAIN_STEPS=7500 NURIKABE_BATCH_SIZE=4 NURIKABE_TRAIN_GPUS=4 \
+  bash scripts/submit_nurikabe.sh
+```
+
+Each checkpoint is about 37 GB, and the checkpointer keeps the last five.
+
 ---
 
 ## 📊 Offline Evaluation
@@ -334,7 +396,7 @@ env XLA_FLAGS="--xla_disable_hlo_passes=constant_folding" \
 | Flag | Description |
 |---|---|
 | `--cfg` | Path to the training config file (same one used for training). |
-| `--task` | Task to evaluate: `sudoku` or `pubmedqa`. Determines which metrics are reported. |
+| `--task` | Task to evaluate: `sudoku`, `pubmedqa` or `nurikabe`. Determines which metrics are reported. |
 | `--step` | Checkpoint step to evaluate. If omitted, the latest checkpoint is used. |
 | `--eval_names` | Comma-separated list of evaluators to run (e.g. `sample_ar_steps64`). If omitted, all evaluators are run. |
 | `--cfg.workdir` | Working directory containing the training checkpoints. |
@@ -368,6 +430,10 @@ Metrics for each evaluator appear under the corresponding eval name
 *   **Sudoku**: overall accuracy, cell accuracy, difficulty-stratified results
     (easy/medium/hard), exact mask accuracy.
 *   **PubMedQA**: short-answer accuracy, BLEU score.
+*   **Nurikabe**: `nurikabe_accuracy` (shading accepted by
+    `nurikabe_verify.verify`), exact match including island sizes, shading
+    accuracy on unknown cells, clue preservation, well-formed output rate;
+    `nurikabe_boards` images.
 
 ---
 
@@ -429,4 +495,69 @@ in FORK_SETUP.md.
     failed before the first step, from the CUDA driver mismatch above and the
     `etils` `jax._src.prng` error. Both are fixed (updated launcher, `etils`
     pin); no training run has completed since.
+*   2026-10-16: base-model sampling on one GH200 through the launcher
+    (jobs 7486185 and 7486297): the checkpoint loaded from the staged copy,
+    and a 512-token canvas was denoised with 48 time points in 73.5 s. Every
+    run logged a recovered 12 GiB allocator retry. The trajectory video
+    notebook and the `diffusiongemma` Jupyter kernel were checked as well;
+    see the run record in [TRAJECTORY_VIDEO.md](TRAJECTORY_VIDEO.md).
 *   Untested: full training runs and multi-node jobs.
+*   2026-10-21, node `nid010130`, current GPU allocation 7605020:
+    LLaDA-8B-Instruct masked sampling passed in a separate PyTorch
+    environment (129 states, 256-token canvas, 3.57 s sampling, 15.21 GiB
+    peak allocation). Both masked and uniform trajectory rendering passed;
+    the masked sampler also passed through the existing CUDA launcher;
+    the nine Sudoku config tests passed through the launcher on CPU. See
+    [TRAJECTORY_VIDEO.md](TRAJECTORY_VIDEO.md#masked-trajectory-2026-10-21)
+    for settings, artifacts, and the verification record.
+*   2026-10-21, same allocation: MD4 linear ancestral reveal sampling
+    passed on the GH200 with both categorical and greedy tokens (3.77 s
+    and 3.64 s). Distribution checks confirmed confidence-independent
+    position selection, linear reveal rates, and fixed revealed tokens;
+    both presentation exports passed. Settings and comparison curves are
+    in [TRAJECTORY_VIDEO.md](TRAJECTORY_VIDEO.md#md4-linear-sampling).
+*   2026-10-27, Nurikabe data: `isometricneko/nurikabe10x10` (revision
+    `8ccd4b2`) converted to 45,023 / 2,487 / 2,490 train/eval/test records
+    and staged in `/projects/u6tp/tw1320/diffgemma/nurikabe_data/`. Every
+    record round-trips from JSONL, every solution passes
+    `nurikabe_verify.verify`, and the largest prompt and response are 215
+    and 154 tokens (budgets 256 and 256). The 8 Nurikabe config tests and
+    19 eval tests passed on the login node's CPU.
+*   2026-10-27, job 7773424 on `nid010110`, two GPUs: a 150-step Nurikabe
+    LoRA smoke run through `scripts/slurm_nurikabe.sh` (no checkpoints,
+    wandb disabled) completed in 17 min 40 s. Total loss went from 4.26 to
+    0.47 (encoder 2.89 → 0.25, diffusion 1.37 → 0.23) at 1.37 s/step after
+    compilation.
+*   2026-10-27, jobs 7773938 and 7773939 on `nid010100`, two GPUs,
+    submitted together by `scripts/submit_nurikabe.sh` into
+    `/projects/u6tp/tw1320/diffgemma/trained/nurikabe_lora_20261027T200816Z_bIzX7y`
+    (`ckpt_0`, `ckpt_1000` and `ckpt_2000`, 37 GB each, were deleted
+    afterwards; logs and wandb files remain). The 2000-step LoRA run
+    (rank 8, global batch 2) took 1 h 5 min, with total loss 0.26 at step
+    1000 and 0.30 at step 2000. The eval job started on the dependency,
+    resolved `latest` to step 2000, and ran `sample_ar_steps64` over 256
+    eval examples in 42 min. Results: `nurikabe_accuracy` 0,
+    `exact_accuracy` 0, `cell_accuracy` 0.651, `clue_accuracy` 0.246,
+    `well_formed` 0.418. Scalars, `nurikabe_boards` images and text samples
+    reached TensorBoard and the training job's wandb run
+    (`diffgemma-nurikabe/99b3d99675d34525`). In the 10 logged samples, 7
+    had 99 to 102 cells instead of 100. Realigning them removed most clue
+    mismatches, but no board was valid even after realignment.
+*   2026-10-28, allocation 7789101 on `nid010086`, one GH200 through the
+    CUDA 13 launcher: both puzzle trajectory notebooks completed with held-out
+    record 0 from their config's eval pipeline. Sudoku restored
+    `sudoku_lora_7443801/checkpoints/ckpt_2000`; Nurikabe restored
+    `nurikabe_lora_20261027T233002Z_NVXIaf/checkpoints/ckpt_7000`. Partial Orbax
+    restore resharded the trained network, including LoRA, onto one GPU without
+    loading optimizer state. Each run saved 64 states of a 256-token canvas
+    (63 updates, temperature 0.7); sampling including compilation took 72.62 s
+    and 63.20 s respectively. Sudoku logged a recovered 8 GiB allocator retry.
+    Both notebooks also passed CPU-only rerendering. MP4s decoded completely:
+    H.264 High, 1920x1080, yuv420p/BT.709, 30 fps, 16.8 s; GIFs are 960x540
+    with matching duration. Start/middle/end frames were inspected: malformed
+    intermediate fields remain visible and boards have no error colouring or
+    clue repairs. Exact HTML text payloads match saved decoded strings.
+    Eight trajectory/checkpoint tests, all 17 Sudoku/Nurikabe config tests,
+    the launcher's GPU computation check, and notebook schema/syntax/empty
+    output checks passed. Artifacts and executed copies are under
+    `outputs/{sudoku,nurikabe}_trajectory/`; source notebooks remain output-free.

@@ -40,3 +40,6 @@ xp_dir*/
 
 # Local Apptainer image for the Isambard CUDA 13 launcher.
 .apptainer/
+
+# Fork: trajectory videos and plots from trajectory_video.ipynb.
+outputs/

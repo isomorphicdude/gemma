@@ -33,6 +33,7 @@ with kd.konfig.imports():
   from kauldron import kd as kd_cfg  # pylint: disable=reimported
   from gemma.diffusion.hackable_diffusion_adapter.eval import sudoku_eval as sudoku_eval_cfg
   from gemma.diffusion.hackable_diffusion_adapter.eval import pubmedqa_eval as pubmedqa_eval_cfg
+  from gemma.diffusion.hackable_diffusion_adapter.eval import nurikabe_eval as nurikabe_eval_cfg
 # pylint: enable=g-import-not-at-top
 
 ################################################################################
@@ -49,7 +50,7 @@ _CONFIG = kd.konfig.DEFINE_config_file(
 _TASK = flags.DEFINE_enum(
     "task",
     None,
-    ["sudoku", "pubmedqa"],
+    ["sudoku", "pubmedqa", "nurikabe"],
     "Task to evaluate.  Determines which metrics are reported.",
 )
 
@@ -112,6 +113,17 @@ def _pubmedqa_metrics():
   }
 
 
+def _nurikabe_metrics():
+  """Return task-specific metrics for the Nurikabe config."""
+  return {
+      "nurikabe": nurikabe_eval_cfg.NurikabeAllMetrics(
+          tokens="samples",
+          ground_truth="batch.solution_tokens",
+          puzzle="batch.puzzle_tokens",
+      ),
+  }
+
+
 def _sudoku_summaries():
   """Return task-specific summaries (board images) for the Sudoku config."""
   return {
@@ -124,13 +136,26 @@ def _sudoku_summaries():
   }
 
 
+def _nurikabe_summaries():
+  """Return task-specific summaries (board images) for the Nurikabe config."""
+  return {
+      "nurikabe_boards": nurikabe_eval_cfg.NurikabeBoardImages(
+          tokens="samples",
+          ground_truth="batch.solution_tokens",
+          puzzle="batch.puzzle_tokens",
+      ),
+  }
+
+
 _TASK_METRICS = {
     "sudoku": _sudoku_metrics,
     "pubmedqa": _pubmedqa_metrics,
+    "nurikabe": _nurikabe_metrics,
 }
 
 _TASK_SUMMARIES = {
     "sudoku": _sudoku_summaries,
+    "nurikabe": _nurikabe_summaries,
 }
 
 
@@ -144,7 +169,7 @@ def _inject_ar_evals(cfg, task):
 
   Args:
     cfg: The (unresolved) Kauldron trainer config.
-    task: Task name (``"sudoku"`` or ``"pubmedqa"``).
+    task: Task name (``"sudoku"``, ``"pubmedqa"`` or ``"nurikabe"``).
   """
   eval_metrics = _denoising_metrics()
   if task_metrics_fn := _TASK_METRICS.get(task):

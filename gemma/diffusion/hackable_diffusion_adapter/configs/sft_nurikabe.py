@@ -9,6 +9,7 @@ from kauldron import konfig
 with konfig.imports():
   from gemma.diffusion import _models
   from gemma.diffusion.hackable_diffusion_adapter.data.sudoku import sudoku_data
+  from gemma.diffusion.hackable_diffusion_adapter.eval import nurikabe_eval
   from gemma.diffusion.hackable_diffusion_adapter.hd import gemma_checkpointer
   from gemma.diffusion.hackable_diffusion_adapter.hd import hd_gemma_network
   from gemma.diffusion.hackable_diffusion_adapter.hd import lora
@@ -200,8 +201,14 @@ def get_config(args: ConfigArgs = ConfigArgs()):
       prompt_template=cfg.ref.aux.nurikabe_prompt,
   )
 
-  # Nurikabe scoring is not implemented yet; do not apply Sudoku-only metrics.
   eval_metrics = {
+      "nurikabe": nurikabe_eval.NurikabeAllMetrics(
+          tokens="samples",
+          ground_truth="batch.solution_tokens",
+          puzzle="batch.puzzle_tokens",
+      ),
+  }
+  eval_metrics.update({
       "processed_denoising_steps": kd.metrics.SingleDimension(
           tensor="processed_denoising_steps", index=None
       ),
@@ -211,8 +218,15 @@ def get_config(args: ConfigArgs = ConfigArgs()):
       "average_denoising_steps_per_canvas": kd.metrics.SingleDimension(
           tensor="average_denoising_steps_per_canvas", index=None
       ),
+  })
+
+  eval_summaries = {
+      "nurikabe_boards": nurikabe_eval.NurikabeBoardImages(
+          tokens="samples",
+          ground_truth="batch.solution_tokens",
+          puzzle="batch.puzzle_tokens",
+      ),
   }
-  eval_summaries = {}
 
   all_evals = ar_eval.make_ar_evals(
       cfg,

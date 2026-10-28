@@ -2,7 +2,9 @@
 
 Read and follow [AGENT.md](AGENT.md) before working in this directory or its
 subdirectories. It contains the adapter's setup, testing, training,
-evaluation, and code modification rules. Also read the repository's
+evaluation, and code modification rules. For the denoising trajectory videos
+(`trajectory_video.ipynb`), follow [TRAJECTORY_VIDEO.md](TRAJECTORY_VIDEO.md).
+Also read the repository's
 [FORK_SETUP.md](../../../FORK_SETUP.md) for the fork workflow and provisioning.
 
 On Isambard-AI Phase 2:

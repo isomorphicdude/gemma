@@ -20,9 +20,11 @@ staged checkpoint paths), is recorded in the adapter's
 | `pyproject.toml` | `hackable-diffusion` pinned to commit `8581c87` (upstream leaves it unpinned; its HEAD had already moved on 2026-10-02). `etils` pinned to commit `de6d7b2` (the 1.14.0 release fails with jax 0.11, see the [installation notes](#installation-editable-with-uv)). |
 | `constraints.txt` | Exact versions of the working x86-64 environment (`uv pip freeze`), used as a constraints file. |
 | `excludes-aarch64.txt` | Packages to drop from resolution on arm64 (`tensorflow-cpu`, see [arm64](#arm64--gh200-clusters)). |
-| `.gitignore` | Prepared datasets (`*.bagz`, `*.jsonl`, `sudoku.csv`), `xp_dir*/` work directories, `.venv/`. |
+| `.gitignore` | Prepared datasets (`*.bagz`, `*.jsonl`, `sudoku.csv`), `xp_dir*/` work directories, `.venv/`, `outputs/` (trajectory videos). |
 | `scripts/isambard_cuda13.sh` | Apptainer launcher for the ARM64 checkout's virtual environment; uses the host CUDA driver, or CUDA 13 forward compatibility when the host driver is older. |
 | `scripts/check_cuda13.py` | Inspect loaded driver libraries and verify a compiled JAX GPU matrix product. |
+| `gemma/diffusion/hackable_diffusion_adapter/trajectory_video.ipynb` | Record one denoising trajectory of the base model and export presentation videos (1080p MP4, GIF, poster, snapshot plot, canvas-only MP4) to `outputs/`. Needs `ipykernel`, `nbclient` and `imageio-ffmpeg` in addition to the base install. The notebook also shows how to register the `diffusiongemma` Jupyter kernel, which runs inside the launcher, for interactive use on a GPU node. |
+| `scripts/execute_trajectory_video.py` | Execute that notebook in a fresh kernel through Slurm and the launcher, or only its rendering cells on a CPU with `--render-only`. |
 | `FORK_SETUP.md` | This document. |
 
 Everything else is upstream code. Put new work in new files where possible (for

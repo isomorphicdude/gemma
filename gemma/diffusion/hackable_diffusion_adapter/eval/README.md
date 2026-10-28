@@ -54,6 +54,30 @@ A comprehensive evaluation suite for Sudoku puzzle solving.
     *   **`count`**: Tracks the quantity of evaluated instances in each
         difficulty category.
 
+### 3b. Nurikabe Evaluation (`nurikabe_eval.py`)
+
+Scores 10x10 Nurikabe outputs (100 cells: `#` for sea, island size for island
+cells). The first 100 cell tokens (`#`, `?` or a whole number, so `10` is one
+cell) are taken from the decoded sample.
+
+*   **`NurikabeAllMetrics`**: host-side metric reporting
+    *   **`nurikabe_accuracy`**: the shading passes `nurikabe_verify.verify`
+        (clues white, no 2x2 sea, connected sea, one clue per island of that
+        size) and every cell is `#` or a number. Solutions are unique, so this
+        equals matching the ground-truth shading.
+    *   **`nurikabe_exact_accuracy`**: all 100 cells, island sizes included,
+        match the ground truth.
+    *   **`nurikabe_cell_accuracy`**: fraction of unknown (`?`) cells shaded
+        as in the ground truth.
+    *   **`nurikabe_clue_accuracy`**: every clue cell keeps its number.
+    *   **`nurikabe_well_formed`**: exactly 100 cells, each `#` or a number.
+    *   **`nurikabe_count`**: number of evaluated examples.
+*   **`NurikabeBoardImages`**: summary rendering the puzzle next to the
+    model's board with rule violations highlighted
+    (`nurikabe_viz.render_nurikabe`).
+*   **`nurikabe_verify.py`**: standalone verifier, also usable from the
+    command line on a board file.
+
 ### 4. Text Metrics (`text_metric.py`)
 
 A utility metric to decode and log generated samples alongside prompts during
